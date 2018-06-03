@@ -1,0 +1,19 @@
+{
+  "name": "aws-wrapper",
+  "version": "1.0.0-beta",
+  "description": "AWS wrapper that simplifies usage of aws resources.",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KrickyKiki/aws-wrapper.git"
+  },
+  "keywords": [
+    "aws"
+  ],
+  "author": "KrickyKiki <kris.sekeres@gmail.com>",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/KrickyKiki/aws-wrapper/issues"
+  },
+  "homepage": "https://github.com/KrickyKiki/aws-wrapper#readme"
+}
