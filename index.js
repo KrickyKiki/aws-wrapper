@@ -22,6 +22,7 @@ let Limits = {};
 let Queue = {};
 let Count = {};
 let Watcher = {};
+let Strikes = {};
 let FinishCallbacks = {};
 
 const LimitManager = {
@@ -58,28 +59,36 @@ const LimitManager = {
       Read: [],
       Write: []
     };
+    Strikes[TableName] = 0;
+    FinishCallbacks[TableName] = [];
     Watcher[TableName] = {
       start: setInterval(() => {
         Count[TableName].Read = 0;
         Count[TableName].Write = 0;
-        for (let i = 0; i < Queue[TableName].Read.length; i++) {
-        // for (let i in Queue[TableName].Read) {
-          if (LimitManager.canRead(TableName)) {
-            Queue[TableName].Read[i]();
-            Queue[TableName].Read.splice(i, 1);
-            --i;
-          } else {
-            break;
+        if (LimitManager.readQueueEmpty(TableName) && LimitManager.writeQueueEmpty(TableName)) {
+          Strikes[TableName]++;
+          if (Strikes[TableName] == 2) {
+            LimitManager.stopLimitWatch(TableName);
           }
-        }
-        for (let i = 0; i < Queue[TableName].Write.length; i++) {
-        // for (let i in Queue[TableName].Write) {
-          if (LimitManager.canWrite(TableName)) {
-            Queue[TableName].Write[i]();
-            Queue[TableName].Write.splice(i, 1);
-            --i;
-          } else {
-            break;
+        } else {
+          Strikes[TableName] = 0;
+          for (let i = 0; i < Queue[TableName].Read.length; i++) {
+            if (LimitManager.canRead(TableName)) {
+              Queue[TableName].Read[i](() => {
+                Queue[TableName].Read.splice(i, 1);
+              });
+            } else {
+              break;
+            }
+          }
+          for (let i = 0; i < Queue[TableName].Write.length; i++) {
+            if (LimitManager.canWrite(TableName)) {
+              Queue[TableName].Write[i](() => {
+                Queue[TableName].Write.splice(i, 1);
+              });
+            } else {
+              break;
+            }
           }
         }
       }, 1000)
@@ -93,10 +102,10 @@ const LimitManager = {
         Queue[TableName] = null;
         clearInterval(Watcher[TableName].start);
         clearInterval(Watcher[TableName].stop);
-        if (FinishCallbacks[TableName]) {
-          FinishCallbacks[TableName]();
-          FinishCallbacks[TableName] = null;
+        for (let i = 0, l = FinishCallbacks[TableName].length; i < l; i++) {
+          FinishCallbacks[TableName][i]();
         }
+        FinishCallbacks[TableName] = [];
       }
     }, 1000);
   },
@@ -110,6 +119,26 @@ const LimitManager = {
 
 let Table = function (TableName) {
   this.TableName = TableName;
+  this.query = function (args, callback) {
+    args.TableName = this.TableName;
+    main.DynamoDB.query(args, callback);
+    return this;
+  },
+  this.scan = function (args1, args2) {
+    let args, callback;
+    if (args2) {
+      args = args1;
+      args.TableName = this.TableName;
+      callback = args2;
+    } else {
+      args = {
+        TableName: this.TableName
+      }
+      callback = args1;
+    }
+    main.DynamoDB.scan(args, callback);
+    return this;
+  },
   this.getItem = function (args, callback) {
     args.TableName = this.TableName;
     main.DynamoDB.getItem(args, callback);
@@ -125,6 +154,11 @@ let Table = function (TableName) {
     main.DynamoDB.putItems(args, callback);
     return this;
   };
+  this.getItems = function (args, callback) {
+    args.TableName = this.TableName;
+    main.DynamoDB.getItems(args, callback);
+    return this;
+  },
   this.setReadLimit = function (args) {
     args.TableName = this.TableName;
     main.DynamoDB.setReadLimit(args);
@@ -190,8 +224,12 @@ const main = {
       if (!args.Bucket) throw new Error("Missing param: Bucket");
       if (!args.Key) throw new Error("Missing param: Key");
       S3.getObject(args, (err, data) => {
-        if (err) throw new Error(err);
-        callback(data.Body.toString());
+        if (err.code == 'NoSuchKey') {
+          callback(null);
+        } else {
+          if (err) throw new Error(err);
+          callback(data.Body.toString());
+        }
       });
       return main.S3;
     },
@@ -208,13 +246,53 @@ const main = {
     }
   },
   DynamoDB: {
+    query: (args, callback) => {
+      if (!args.TableName) throw new Error("Missing param: TableName");
+      let Items = [];
+      let query = (ExclusiveStartKey) => {
+        if (ExclusiveStartKey)
+          args.ExclusiveStartKey = ExclusiveStartKey;
+        DynamoDB.query(args, (err, data) => {
+          if (err) throw new Error(err);
+          for (let i = 0, l = data.Items.length; i < l; i++)
+            Items.push(data.Items[i]);
+          if (data.LastEvaluatedKey)
+            query(data.LastEvaluatedKey);
+          else
+            callback(Items);
+        });
+      };
+      query(null);
+    },
+    scan: (args, callback) => {
+      if (!args.TableName) throw new Error("Missing param: TableName");
+      let Items = [];
+      let scan = (ExclusiveStartKey) => {
+        if (ExclusiveStartKey)
+          args.ExclusiveStartKey = ExclusiveStartKey;
+        DynamoDB.scan(args, (err, data) => {
+          if (err) throw new Error(err);
+          for (let i = 0, l = data.Items.length; i < l; i++)
+            Items.push(data.Items[i]);
+          if (data.LastEvaluatedKey)
+            scan(data.LastEvaluatedKey);
+          else
+            callback(Items);
+        });
+      };
+      scan(null);
+    },
     getItem: (args, callback) => {
       if (!args.TableName) throw new Error("Missing param: TableName");
       if (!args.Key) throw new Error("Missing param: Key");
-      LimitManager.addToReadQueue(args.TableName, () => {
+      LimitManager.addToReadQueue(args.TableName, (requestDone) => {
+        let Item = null;
         DynamoDB.getItem(args, (err, data) => {
           if (err) throw new Error(err);
-          callback(data);
+          if (!data.empty())
+            Item = data.Item;
+          requestDone();
+          callback(Item);
         });
         LimitManager.newRead(args.TableName);
       });
@@ -223,9 +301,10 @@ const main = {
     putItem: (args, callback) => {
       if (!args.TableName) throw new Error("Missing param: TableName");
       if (!args.Item) throw new Error("Missing param: Item");
-      LimitManager.addToWriteQueue(args.TableName, () => {
+      LimitManager.addToWriteQueue(args.TableName, (requestDone) => {
         DynamoDB.putItem(args, (err, data) => {
           if (err) throw new Error(err);
+          requestDone();
           if (callback) callback(data);
         });
         LimitManager.newWrite(args.TableName);
@@ -245,6 +324,23 @@ const main = {
         main.DynamoDB.onFinish(args, () => {
           callback()});
       return main.DynamoDB;
+    },
+    getItems: (args, callback) => {
+      if (!args.TableName) throw new Error("Missing param: TableName");
+      if (!args.Keys) throw new Error("Missing param: Keys");
+      let Items = [];
+      for (let i = 0; i < args.Keys.length; i++) {
+        main.DynamoDB.getItem({
+          TableName: args.TableName,
+          Key: args.Keys[i]
+        }, (Item) => {
+          if (Item)
+            Items.push(Item);
+        });
+      }
+      FinishCallbacks[args.TableName].push(() => {
+        callback(Items);
+      });
     },
     setReadLimit: (args) => {
       if (!args.TableName) throw new Error("Missing param: TableName");
@@ -315,7 +411,7 @@ const main = {
     },
     onFinish: (args, callback) => {
       if (!args.TableName) throw new Error("Missing param: TableName");
-      FinishCallbacks[args.TableName] = callback;
+      FinishCallbacks[args.TableName].push(callback);
       if (!LimitManager.isStopLimitSet(args.TableName))
         LimitManager.stopLimitWatch(args.TableName);
       return main.DynamoDB;

@@ -115,6 +115,23 @@ Table.putItems({
 });
 
 
+// Query Example:
+
+Table.query(params, (Items) => {
+  // Items
+});
+
+
+// Scan Example:
+
+Table.scan((Items) => {
+  // Items
+});
+
+
+// * Wrapper will handle ExclusiveStartKey
+
+
 // Access original modules
 
 const AWS = AWSw.get.AWS(); // expose AWS
